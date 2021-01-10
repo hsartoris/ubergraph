@@ -253,25 +253,41 @@
   "Work backwards from the destination to reconstruct the path"
   ([to backlinks] (find-path2 to backlinks ()))
   ([to ^Map backlinks path]
-   (let [[prev-edge _cost] (.get backlinks to)]
-     (if (= prev-edge ())
+   (let [[prev-edge _cost] (.get backlinks to)
+         [node depth] to
+         path (cons prev-edge path)]
+     (println to prev-edge)
+     (if (zero? depth)
        path
-       (recur (uber/src prev-edge) backlinks (cons prev-edge path))))))
+       (recur [(uber/src prev-edge) (dec depth)] backlinks path)))))
 
 (defn- all-paths
   "Essentially AllPathsFromSource but for backlink maps with costs."
   [backlinks]
   (reify ubergraph.protocols/IAllPathsFromSource
     (path-to [this dest]
-      (when-let [[last-edge cost] (get backlinks dest)]
-        (->Path (delay (find-path2 dest backlinks))
+      ; very inefficient
+      (when-let [[tag [last-edge cost]]
+                 (some #(when (= dest (ffirst %)) %) backlinks)]
+        (->Path (delay (find-path2 tag backlinks))
                 cost dest last-edge)))
+      ;(when-let [tag (some #(when (= dest (ffirst %)) %) (keys backlinks))]
+      ;  (let [[last-edge cost] (get backlinks 
+      ;  (->Path (delay (find-path2 tag backlinks))
+      ;          (
+      ;(when-let [[tag cost] (some #(= dest (ffirst %)) backlinks)]
+      ;  (->Path (delay (find-path2 tag backlinks))
+      ;          cost dest 
+      ;(when-let [[last-edge cost] (get backlinks dest)]
+      ;  (->Path (delay (find-path2 dest backlinks))
+      ;          cost dest last-edge)))
     (all-destinations [this]
-      (keys backlinks))))
+      (into #{} (map first) (keys backlinks)))))
+      ;(keys backlinks))))
 
 (defn least-cost-path-alt
   "Alternative implementation of least-cost-path. Does not support traverse."
-  [g starting-nodes goal? cost-fn node-filter edge-filter min-cost max-cost]
+  [g starting-nodes goal? may-final-edge? cost-fn node-filter edge-filter]
   (let [starting-nodes (filterv #(and (uber/has-node? g %)
                                       (node-filter %))
                                 starting-nodes)
@@ -279,49 +295,85 @@
         ; form [edge cost], based on `base-cost`, with those remaining
         filter-append-cost
         (fn filter-append-cost
-          [base-cost]
+          [base-cost depth]
           (comp (filter edge-filter)
-                (map #(vector % (+ base-cost (cost-fn %))))))]
+                (map #(vector [% depth] (+ base-cost (cost-fn %))))))]
 
     ; starting position is all valid outbound edges from start nodes in queue,
     ; with all start nodes in backlinks pointing nowhere
     (loop [queue      (into (priority-map)
                             (comp (mapcat (partial uber/out-edges g))
-                                  (filter-append-cost 0))
+                                  (filter-append-cost 0 0))
                             starting-nodes)
-           backlinks  (zipmap starting-nodes (repeat [() 0]))]
-      (let [[edge $start->dest] (peek queue)
+           backlinks  (into {}
+                            (map (fn [node]
+                                   [[node 0]
+                                    [() 0]]))
+                            starting-nodes)]
+           ;backlinks  (zipmap starting-nodes (repeat [() 0]))]
+      (let [[[edge depth] $start->dest] (peek queue)
             dest  (some-> edge uber/dest)
             queue (when edge (pop queue))]
+        (println "Edge" (e->str edge) "is at depth" depth)
         (cond
-          (nil? edge)
-          (when (identical? no-goal goal?) (all-paths backlinks))
+          (= depth 10) (println "We're in too deep!")
 
-          (or (contains? backlinks dest)
+          (nil? edge)
+          (if (identical? no-goal goal?) 
+            (all-paths backlinks)
+            (println "Uh-oh" backlinks))
+
+          (or (contains? backlinks [dest depth])
               (not (node-filter dest)))
           (recur queue backlinks)
 
-          (goal? dest)
-          (->Path (delay (find-path2 dest (assoc backlinks dest [edge $start->dest])))
-                  $start->dest dest edge)
           :else
+          (let [curr [dest depth]
+                backlinks (assoc backlinks curr [edge $start->dest])]
+            (if (and (goal? dest) (may-final-edge? edge))
+              (do
+                ;(println backlinks)
+              (->Path (delay (find-path2 curr backlinks)) $start->dest dest edge))
+          (let [es (uber/out-edges g dest)]
+            (println "Considering edges:"
+                     (str (mapv e->str es)))
+            ;(doseq [e es] (println (e->str e)))
+
           (recur
             ; because the outbound edges of a given node are considered only
             ; once, there is no need to check for edge presence in map
             (into queue
-                  (filter-append-cost $start->dest)
+                  (filter-append-cost $start->dest (inc depth))
                   (uber/out-edges g dest))
-            (assoc backlinks dest [edge $start->dest])))))))
+            backlinks)))))))))
+
+;          (and (= end-node dest) (may-final-edge? edge))
+;          (->Path (delay (find-path2 dest (assoc backlinks dest [edge $start->dest])))
+;                  $start->dest dest edge)
+;          :else
+;          (let [es (uber/out-edges g dest)]
+;            (println "Considering edges:")
+;            (doseq [e es] (println (e->str e)))
+;
+;          (recur
+;            ; because the outbound edges of a given node are considered only
+;            ; once, there is no need to check for edge presence in map
+;            (into queue
+;                  (filter-append-cost $start->dest (inc depth))
+;                  (uber/out-edges g dest))
+;            (assoc backlinks dest [edge $start->dest]))))))))
 
 (defn call-least-cost-path-alt
-  [g {:keys [start-node end-node cost-fn node-filter edge-filter min-cost max-cost]
+  [g {:keys [start-node end-node cost-fn node-filter edge-filter min-cost max-cost
+             may-final-edge?]
       :or   {cost-fn      (constantly 1)
              node-filter  (constantly true)
              edge-filter  (constantly true)
              min-cost     0
-             max-cost     100}}]
+             max-cost     100
+             may-final-edge? (constantly true)}}]
   (least-cost-path-alt
-    g [start-node] #{end-node} cost-fn node-filter edge-filter min-cost max-cost))
+    g [start-node] #{end-node} may-final-edge? cost-fn node-filter edge-filter))
 
 
 (defn- least-cost-path-seq-helper
@@ -371,6 +423,8 @@
   (defaults to weight). Returns a list of edges that form a path with the least cost 
   from one of the starting nodes to a node that satisfies the goal? predicate."  
   [g starting-nodes goal? cost-fn node-filter edge-filter traverse? min-cost max-cost]
+  (if-not traverse?
+    (least-cost-path-alt g starting-nodes goal? (constantly true) cost-fn node-filter edge-filter)
   (let [least-costs (HashMap.),
         backlinks (HashMap.)
         queue (PriorityQueue. (fn [x y] (compare (x 0) (y 0))))]
@@ -380,8 +434,8 @@
       (.add queue [0 node]))
     (if traverse?
       (least-cost-path-seq-helper g goal? queue least-costs backlinks cost-fn node-filter edge-filter min-cost max-cost)
-      (least-cost-path-alt g starting-nodes goal? cost-fn node-filter edge-filter min-cost max-cost))))
-      ;(least-cost-path-helper g goal? queue least-costs backlinks cost-fn node-filter edge-filter))))
+      ;(least-cost-path-alt g starting-nodes goal? cost-fn node-filter edge-filter min-cost max-cost))))
+      (least-cost-path-helper g goal? queue least-costs backlinks cost-fn node-filter edge-filter)))))
 
 (defn- least-cost-path-with-heuristic-helper
   "AKA A* search"
