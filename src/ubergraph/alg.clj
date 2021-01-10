@@ -1,6 +1,7 @@
 (ns ubergraph.alg
   "Contains algorithms that operate on Ubergraphs, and all the functions associated with paths"
-  (:require [ubergraph.core :as uber]
+  (:require [clojure.data.priority-map :refer [priority-map]]
+            [ubergraph.core :as uber]
             [ubergraph.protocols :as prots]
             [potemkin :refer [import-vars]]
             [clojure.core.reducers :as r]
@@ -243,6 +244,86 @@
                               (Collections/unmodifiableMap least-costs))
         nil))))
 
+(defn- e->str
+  "Stringify an edge"
+  [e]
+  (str (uber/src e) "->" (uber/dest e)))
+
+(defn- find-path2
+  "Work backwards from the destination to reconstruct the path"
+  ([to backlinks] (find-path2 to backlinks ()))
+  ([to ^Map backlinks path]
+   (let [[prev-edge _cost] (.get backlinks to)]
+     (if (= prev-edge ())
+       path
+       (recur (uber/src prev-edge) backlinks (cons prev-edge path))))))
+
+(defn- all-paths
+  "Essentially AllPathsFromSource but for backlink maps with costs."
+  [backlinks]
+  (reify ubergraph.protocols/IAllPathsFromSource
+    (path-to [this dest]
+      (when-let [[last-edge cost] (get backlinks dest)]
+        (->Path (delay (find-path2 dest backlinks))
+                cost dest last-edge)))
+    (all-destinations [this]
+      (keys backlinks))))
+
+(defn least-cost-path-alt
+  "Alternative implementation of least-cost-path. Does not support traverse."
+  [g starting-nodes goal? cost-fn node-filter edge-filter min-cost max-cost]
+  (let [starting-nodes (filterv #(and (uber/has-node? g %)
+                                      (node-filter %))
+                                starting-nodes)
+        ; transducer that filters for acceptable edges and creates tuples of
+        ; form [edge cost], based on `base-cost`, with those remaining
+        filter-append-cost
+        (fn filter-append-cost
+          [base-cost]
+          (comp (filter edge-filter)
+                (map #(vector % (+ base-cost (cost-fn %))))))]
+
+    ; starting position is all valid outbound edges from start nodes in queue,
+    ; with all start nodes in backlinks pointing nowhere
+    (loop [queue      (into (priority-map)
+                            (comp (mapcat (partial uber/out-edges g))
+                                  (filter-append-cost 0))
+                            starting-nodes)
+           backlinks  (zipmap starting-nodes (repeat [() 0]))]
+      (let [[edge $start->dest] (peek queue)
+            dest  (some-> edge uber/dest)
+            queue (when edge (pop queue))]
+        (cond
+          (nil? edge)
+          (when (identical? no-goal goal?) (all-paths backlinks))
+
+          (or (contains? backlinks dest)
+              (not (node-filter dest)))
+          (recur queue backlinks)
+
+          (goal? dest)
+          (->Path (delay (find-path2 dest (assoc backlinks dest [edge $start->dest])))
+                  $start->dest dest edge)
+          :else
+          (recur
+            ; because the outbound edges of a given node are considered only
+            ; once, there is no need to check for edge presence in map
+            (into queue
+                  (filter-append-cost $start->dest)
+                  (uber/out-edges g dest))
+            (assoc backlinks dest [edge $start->dest])))))))
+
+(defn call-least-cost-path-alt
+  [g {:keys [start-node end-node cost-fn node-filter edge-filter min-cost max-cost]
+      :or   {cost-fn      (constantly 1)
+             node-filter  (constantly true)
+             edge-filter  (constantly true)
+             min-cost     0
+             max-cost     100}}]
+  (least-cost-path-alt
+    g [start-node] #{end-node} cost-fn node-filter edge-filter min-cost max-cost))
+
+
 (defn- least-cost-path-seq-helper
   "Variation that produces a seq of paths produced during the traversal"
   [g goal? ^PriorityQueue queue ^HashMap least-costs 
@@ -299,7 +380,8 @@
       (.add queue [0 node]))
     (if traverse?
       (least-cost-path-seq-helper g goal? queue least-costs backlinks cost-fn node-filter edge-filter min-cost max-cost)
-      (least-cost-path-helper g goal? queue least-costs backlinks cost-fn node-filter edge-filter))))
+      (least-cost-path-alt g starting-nodes goal? cost-fn node-filter edge-filter min-cost max-cost))))
+      ;(least-cost-path-helper g goal? queue least-costs backlinks cost-fn node-filter edge-filter))))
 
 (defn- least-cost-path-with-heuristic-helper
   "AKA A* search"
