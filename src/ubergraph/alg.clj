@@ -1,6 +1,6 @@
 (ns ubergraph.alg
   "Contains algorithms that operate on Ubergraphs, and all the functions associated with paths"
-  (:require [clojure.data.priority-map :refer [priority-map]]
+  (:require [clojure.data.priority-map :refer [priority-map priority-map-keyfn]]
             [ubergraph.core :as uber]
             [ubergraph.protocols :as prots]
             [potemkin :refer [import-vars]]
@@ -247,7 +247,8 @@
 (defn- e->str
   "Stringify an edge"
   [e]
-  (str (uber/src e) "->" (uber/dest e)))
+  (when (uber/edge? e)
+    (str (uber/src e) "->" (uber/dest e))))
 
 (defn- find-path2
   "Work backwards from the destination to reconstruct the path"
@@ -260,6 +261,23 @@
      (if (zero? depth)
        path
        (recur [(uber/src prev-edge) (dec depth)] backlinks path)))))
+
+(defn- find-path3
+  "For alt alt"
+  ([edge visited] (find-path3 edge visited ()))
+  ([edge visited path]
+   (let [path (cons edge path)
+         [prev-edge _cost] (get visited edge)]
+     (println "edge:" (e->str edge)
+              "prev:" (e->str prev-edge))
+     (if (or (nil? prev-edge) (= prev-edge ()))
+       path
+       (recur prev-edge visited path)))))
+  ;([[edge prev-edge _cost] visited path]
+  ; (let [path (cons edge path)]
+  ;   (if (= prev-edge ())
+  ;     path
+  ;     (recur (get visited prev-edge) visited path)))))
 
 (defn- all-paths
   "Essentially AllPathsFromSource but for backlink maps with costs."
@@ -285,12 +303,173 @@
       (into #{} (map first) (keys backlinks)))))
       ;(keys backlinks))))
 
+(defn- all-paths2
+  "all-paths but for alt alt"
+  [visited]
+  ; visited is a map of edge -> [edge prev-edge cost]
+  (let [all-dest (into #{} (map uber/dest) (keys visited))
+        cheapest-for (fn [dest]
+                       (first (filter #(= dest (uber/dest %)) visited)))
+        cheapest (into {}
+                       (map #(let [[edge _] (cheapest-for %)]
+                               [% edge]))
+                       all-dest)]
+    (reify ubergraph.protocols/IAllPathsFromSource
+      (path-to [this dest]
+        (println "Getting path to" dest)
+        (let [[edge [prev-edge $start->dest]]
+              (first (filter #(= dest (-> % first uber/dest)) visited))]
+          (println edge [prev-edge $start->dest])
+          (->Path (delay (find-path3 edge visited))
+                  $start->dest dest edge)))
+
+        ;(when-let [edge (get cheapest dest)]
+        ;  (let [edge-info (get visited edge)]
+        ;    (->Path (delay (find-path3 edge-info visited))
+        ;            (peek edge-info) dest edge))))
+      (all-destinations [this] all-dest))))
+                           
+
+
+    ;(loop [; edge->[cost prev-edge]
+    ;       queue      (into (priority-map-keyfn first)
+    ;                        (map (fn [edge] [edge [0 nil]]))
+    ;                        starting-edges)
+    ;       ; edge->[prev-edge total-cost]
+    ;       backlinks  (into {}
+    ;                        (map (fn [edge] [edge [() 0]]))
+    ;                        starting-edges)
+    ;       depth 0]
+    ;  (let [[edge [$start->dest prev-edge]] (peek queue)
+    ;        dest  (some-> edge uber/dest)
+    ;        queue (when edge (pop queue))]
+    ;    (println "Edge" (e->str edge))
+    ;    (cond
+    ;      (nil? edge)
+    ;      (if (identical? no-goal goal?)
+    ;        (all-paths backlinks)
+    ;        (println "Uh-oh" backlinks))
+
+    ;      (= depth 25) (println "We're in too deep!")
+
+    ;      (
+
+(defn- edge-info->str
+  "stringify edge info vector"
+  [[edge prev-edge $start->dest]]
+  (str \[ $start->dest \]
+       (e->str edge) \;
+       "prev:" (if (uber/edge? prev-edge)
+                 (e->str prev-edge)
+                 (str prev-edge))))
+
+(defn- print-visited
+  "Prints the visisted map"
+  [visited]
+  (println "-------- visited map --------")
+  (doseq [[_ edge-info] visited]
+    (println (edge-info->str edge-info))))
+
+(defn least-cost-path-alt2
+  "alternative alternative"
+  [g starting-nodes goal? may-final-edge? cost-fn node-filter edge-filter]
+  ; using [edge prev-edge $start->dest] as items
+  (let [starting-nodes (filterv #(and (uber/has-node? g %)
+                                      (node-filter %))
+                                starting-nodes)
+        ; can't use sorted-set because 
+        ; see https://clojuredocs.org/clojure.core/sorted-set-by#example-542692d5c026201cdc327096
+        compare-edges (fn [e1 e2]
+                        (let [c (compare (peek e1) (peek e2))]
+                          (if (not= c 0)
+                            c
+                            (compare (hash e1) (hash e2)))))
+        init-edges (into (sorted-set-by compare-edges)
+                         (comp (mapcat (partial uber/out-edges g))
+                               (filter edge-filter)
+                               (map (fn [edge] [edge () (cost-fn edge)])))
+                         starting-nodes)
+        init-pri-map (into (priority-map-keyfn peek)
+                           (comp (mapcat (partial uber/out-edges g))
+                                 (filter edge-filter)
+                                 (map (fn [edge]
+                                        [edge [() (cost-fn edge)]])))
+                           starting-nodes)]
+    (println "Init edges:")
+    (doseq [e init-edges] (println (edge-info->str e)))
+
+    (println "Beginning algorithm")
+    (loop [queue    init-pri-map
+           visited  (priority-map-keyfn peek)
+           depth    0]
+      (let [[edge [prev-edge $start->dest]] (peek queue)
+            ; TODO
+            edge-info [edge prev-edge $start->dest]
+            dest (some-> edge uber/dest)
+            tail (when edge (pop queue))]
+        (println (edge-info->str edge-info))
+        (cond
+          (= depth 50) (println "We're in too deep!")
+
+          (nil? edge)
+          (if (identical? no-goal goal?)
+            (do (print-visited visited)
+                ;visited)
+                (all-paths2 visited))
+            (println "Uh-oh" visited))
+
+          (contains? visited edge)
+          (do (println "...already visited; skipping")
+              (recur tail visited depth))
+
+          (not (node-filter dest))
+          (do (println "...does not meet requirements")
+              (recur tail visited depth))
+
+          :else
+          (let [visited (assoc visited edge [prev-edge $start->dest])]
+            (println "visited +=" (e->str edge) "=>" (edge-info->str edge-info))
+            (if (and (goal? dest) (may-final-edge? edge))
+              (do (print-visited visited)
+                  (->Path (delay (find-path3 edge visited)) 
+                          $start->dest dest edge))
+              (let [es (uber/out-edges g dest)
+                    new-edges
+                    (into {}
+                          (comp (filter edge-filter)
+                                (map (fn [next-edge]
+                                       [next-edge
+                                        [edge (+ $start->dest
+                                                 (cost-fn next-edge))]])))
+                          es)]
+                (println "considering edges:" (str (mapv e->str es)))
+                (recur
+                  (merge-with
+                    (fn [e1 e2]
+                      (if (< (peek e1) (peek e2)) e1 e2))
+                    tail new-edges)
+                  ;(into tail
+                  ;      (comp (filter edge-filter)
+                  ;            (map (fn [next-edge]
+                  ;                   [next-edge 
+                  ;                    [edge 
+                  ;                     (+ $start->dest (cost-fn next-edge))]])))
+                  ;      es)
+                  visited
+                  (inc depth))))))))))
+
+
+
+
 (defn least-cost-path-alt
   "Alternative implementation of least-cost-path. Does not support traverse."
   [g starting-nodes goal? may-final-edge? cost-fn node-filter edge-filter]
   (let [starting-nodes (filterv #(and (uber/has-node? g %)
                                       (node-filter %))
                                 starting-nodes)
+        starting-edges (into [] (comp (mapcat (partial uber/out-edges g))
+                                      (filter edge-filter))
+                             starting-nodes)
         ; transducer that filters for acceptable edges and creates tuples of
         ; form [edge cost], based on `base-cost`, with those remaining
         filter-append-cost
@@ -298,7 +477,6 @@
           [base-cost depth]
           (comp (filter edge-filter)
                 (map #(vector [% depth] (+ base-cost (cost-fn %))))))]
-
     ; starting position is all valid outbound edges from start nodes in queue,
     ; with all start nodes in backlinks pointing nowhere
     (loop [queue      (into (priority-map)
@@ -372,7 +550,7 @@
              min-cost     0
              max-cost     100
              may-final-edge? (constantly true)}}]
-  (least-cost-path-alt
+  (least-cost-path-alt2
     g [start-node] #{end-node} may-final-edge? cost-fn node-filter edge-filter))
 
 
@@ -424,7 +602,7 @@
   from one of the starting nodes to a node that satisfies the goal? predicate."  
   [g starting-nodes goal? cost-fn node-filter edge-filter traverse? min-cost max-cost]
   (if-not traverse?
-    (least-cost-path-alt g starting-nodes goal? (constantly true) cost-fn node-filter edge-filter)
+    (least-cost-path-alt2 g starting-nodes goal? (constantly true) cost-fn node-filter edge-filter)
   (let [least-costs (HashMap.),
         backlinks (HashMap.)
         queue (PriorityQueue. (fn [x y] (compare (x 0) (y 0))))]
